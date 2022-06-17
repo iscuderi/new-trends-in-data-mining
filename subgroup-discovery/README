@@ -1,0 +1,5 @@
+The objective of the present work is to analyze the dataset "Crime Data from 2020 to Present" (download available at: 
+https://data.lacity.org/Public-Safety/Crime-Data-from-2020-to-Present/2nrs-mtv8), using subgroup discovery techniques. 
+The dataset to be studied reflects crime incidents in the city of Los Angeles from 2020 to present. 
+These data are transcribed from original crime reports that are written on paper and, therefore, there may be some inaccuracies in the data. 
+Some location fields with missing data are noted as (0°, 0°). Address fields are only provided to the nearest hundred blocks to maintain privacy.
