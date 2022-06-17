@@ -1,0 +1,821 @@
+---
+title: "Entrega no balanceada"
+output:
+  html_document:
+    df_print: paged
+---
+
+
+<style>
+body {
+text-align: justify}
+</style>
+
+```{r global_options, include=FALSE}
+knitr::opts_chunk$set(knitr::opts_chunk$set(echo = TRUE, comment = NA, message = FALSE, warning = FALSE))
+
+library(unbalanced)
+library(tidyverse)
+library(kableExtra)
+library(caret)
+library(ggcorrplot)
+library(psych)
+library(dplyr)
+library(MASS)
+library (e1071)
+library(rpart)
+library(rpart.plot)
+
+```
+
+
+# 1. Introducción
+
+El presente trabajo analiza los datos relativos al dataset *CreditCard*. El objetivo es predecir transacciones fraudulentas realizadas con tarjeta de crédito. *Clase* es la variable de respuesta y toma el valor 1 en caso de fraude y 0 en caso contrario.
+
+El dataset está compuesto por 284.807 observaciones y 31 variables. Contiene las transacciones realizadas durante 2 días de Septiembre del 2013 en Europa. Posee sólo variables de entrada numéricas, que son el resultado de un Análisis de Componentes Principales. Desafortunadamente, debido a problemas de confidencialidad, no se pueden proporcionar las características originales sobre los datos. Las únicas características que no se han transformado son las variables Tiempo y Cantidad.
+
+# 2. Importado y limpieza de los datos
+
+Procedemos a importar los datos y realizamos e imprimimos los primeros 5 registros, de manera de tener una primera aproximación a los datos:
+
+```{r}
+df=read.table("creditcard.csv",header=TRUE,sep=",")
+head(df)
+```
+
+Eliminamos la columna *Tiempo*, ya que no es relevante para realizar la predicción.
+
+```{r}
+df = df[,-1]
+df_analisis_exploratorio=df
+```
+
+Procedemos a analizar la correlación entre las variables:
+
+```{r}
+mat.cor = corr.test(df)
+M = round(mat.cor$r, 1)
+ggcorrplot(M, 
+           hc.order = TRUE, 
+           type = "upper",
+           tl.cex = 10,
+           lab = TRUE,
+           lab_size = 1.5,
+           colors = c("salmon3", "tan", "indianred1"))
+```
+
+
+Vemos que no hay multicolinealidad lineal perfecta (>0.7) entre las variables.
+
+A continuación escalamos las variables:
+
+```{r}
+df <- df %>% mutate_at(c(1:29), ~(scale(.) %>% as.vector))
+summary(df)
+```
+
+Observamos que el dataset no posee *NA`s*:
+
+```{r}
+colSums(is.na(df))
+```
+
+Por último, convertimos a factor la variable target:
+
+```{r}
+df$Class=as.factor(df$Class)
+levels(df$Class)=c("0","1")
+```
+
+
+# 3. Análisis exploratorio de los datos
+
+El dataset contiene 284.807 observaciones y 31 variables. Estas van de forma consecutiva desde *V1* hasta *V28*. Asimismo, tenemos la columna *Class*, que indica si la transacción es fraudulenta (1) o no (0) y la columna *Amount*, que indica el monto de las transacciones realizadas.
+
+Vemos que en nuestro dataset hay 284.315 (99,82%) transacciones no fraudulentas y 492 que lo son (0,17%). Esto quiere decir que hay 577 registros de la clase mayoritaria por cada uno de la clase minoritaria.
+
+```{r, echo=FALSE, fig.align = 'center'}
+
+d<-ggplot(data=df, aes(x=Class))+ 
+  geom_bar(fill = "steelblue",width=0.94)+
+  labs(title="Distribución por tipo de transacción", x="Tipo de transacción", y="Cantidad de transacciones")+
+   scale_x_discrete(breaks = c("0", "1"),
+                   labels = c("No fraudulenta", "Fraudulenta"))+
+  geom_text(
+    aes(label = sprintf('%s (%.1f%%)', after_stat(count), after_stat(count / nrow(df) * 100))),
+    stat='count', vjust = 0.98, colour="white")
+d
+
+#table(df$Class)[1]/table(df$Class)[2]
+```
+A continuación analizamos el comportamiento 
+
+```{r, echo=FALSE, fig.align = 'center'}
+df_amount = df_analisis_exploratorio %>% mutate(Amount = case_when(Amount < 50 ~ "1. Menor a  50",
+                                         Amount >= 50 & Amount < 100 ~ "2. Entre [50 y 100)",
+                                         Amount >= 100 & Amount < 500 ~ "3. Entre [100 y 500)",
+                                         Amount >= 500 ~ "4. Mayor a 500"))
+
+d<-ggplot(data=df_amount, aes(x=Amount))+ 
+  geom_bar(fill = "steelblue",width=0.94)+
+  labs(title="Distribución de transacciones por monto", x="Montos", y="Cantidad de transacciones")+
+  geom_text(
+    aes(label = sprintf('%s (%.1f%%)', after_stat(count), after_stat(count / nrow(df_amount) * 100))),
+    stat='count', vjust = 1.05, colour="white")
+d
+
+```
+Vemos que la mayor parte de las transacciones 189.704 (66.6%) corresponden a montos menores 50, seguido de aquellas entre [100 y 500), que alcanzan 47.893 transacciones (16,8%). Las transacciones de entre [50 y 100) totalizan 37.718 (13.2%). Vemos por último, que las mayores a 500 representan solo el 3,3%.  
+
+Si analizamos ahora la distribución combinando monto de la transacción y clase, vemos que hay una mayor proporción de operaciones fraudulentas entre [100 y 500] (estas representan el 19,3% en las fraudulentas vs 16,8% en las no fraudulentas) y en aquellas de más de 500 (7,1% de las fraudulentas vs 3.3% en no fraudulentas). 
+
+```{r, echo=FALSE, fig.align = 'center'}
+fraudulentas = df_amount %>% filter(Class=="1")
+prop.table(table(fraudulentas$Amount))
+```
+
+```{r, echo=FALSE, fig.align = 'center'}
+no_fraudulentas= df_amount %>% filter(Class=="0")
+prop.table(table(no_fraudulentas$Amount))
+```
+
+Debajo realizamos un summary del dataframe, de modo de poder observar las principales características relativas a los valores y a la distribución de las variables. Debido a que las variables que van desde *V1* a *V28* son producto del análisis de componentes principales y por lo tanto desconocemos qué representan, no nos es posible realizar un análisis pormenorizado de las mismas.
+
+```{r, echo=FALSE, fig.align = 'center'}
+kable(summary(df_analisis_exploratorio))
+```
+
+
+# 4. Modelado
+
+En primer lugar se deben crear dos subsets, uno de *training* y otro de *testing*, para entrenar y testear los modelos. Asimismo, se aplica una semilla al inicio, de manera de hacer los resultados replicables.
+
+Dividimos los datos de la siguiente manera:
+
+- 75% train
+- 25% test
+
+```{r}
+set.seed(2021)
+muestra.train=sample(1:dim(df)[1],round(dim(df)[1]*0.75),replace=FALSE)
+df.train=df[muestra.train,]
+muestra.test=setdiff(1:dim(df)[1],muestra.train)
+df.test=df[muestra.test,]
+```
+
+A continuación aplicamos los siguientes modelos de clasificación:
+
+  -Logistic Regression
+
+  -Quadratic Discriminant Analysis (QDA)
+
+  -Naive Bayes
+
+  -Árboles
+
+  
+  
+Realizamos una breve descripción de cada modelo:
+
+*Logistic Regression*: Este método permite estimar la probabilidad de una variable cualitativa binaria en función de una variable cuantitativa. La regresión logística permite calcular la probabilidad de que la variable dependiente pertenezca a cada una de las dos categorías en función del valor que adquiera la variable independiente.
+
+
+*Quadratic Discriminant Analysis (QDA)*: Esta metodología es similar a LDA, con la diferencia de que el QDA considera que cada clase k tiene su propia matriz de covarianza y, como consecuencia, la función discriminante toma forma cuadrática.
+
+
+*Naive Bayes*: El algoritmo Bayes naive es un algoritmo de clasificación de variables cualitativas basado en los teoremas de Bayes. Este algoritmo es llamado “ingenuo” porque calcula las probabilidades condicionales por separado, como si fueran independientes una de otra. Una vez que se obtienen las probabilidades condicionales por separado, se calcula la probabilidad conjunta de todas ellas, mediante un producto, para determinar la probabilidad de que pertenezca a la categoría. Luego se itera dicho proceso para cada observación.
+
+
+*Árboles*: Mediante este modelo se intenta predecir una variable dependiente a partir de variables independientes. Existen árboles de clasificación (variable discreta) y árboles de regresión (variable continua). Lo que hace este algoritmo es encontrar la variable independiente que mejor separa nuestros datos en grupos, que corresponden con las categorías de la variable objetivo. Esta mejor separación es expresada con una regla. A cada regla corresponde un nodo.
+
+Una vez hecho esto, los datos son separados (particionados) en grupos a partir de la regla obtenida. Después, para cada uno de los grupos resultantes, se repite el mismo proceso. Se busca la variable que mejor separa los datos en grupos, se obtiene una regla, y se separan los datos. Hacemos esto de manera recursiva hasta que nos es imposible obtener una mejor separación. Cuando esto ocurre, el algoritmo se detiene. Cuando un grupo no puede ser partido mejor, se le llama nodo terminal u hoja.
+
+Las métricas que utilizaremos para evaluar el rendimiento de los modelos son las siguientes:
+
+*Recall (TPR)*:
+
+$$ \text {Recall = Verdaderos positivos / (Verdaderos positivos + Falsos negativos) } $$
+Es una forma de analizar la tasa de verdaderos positivos. Si su valor es bajo, quiere decir que hay muchos falsos negativos, lo que implica que muchas transacciones fraudulentas no fueron detectadas. Esta es la principal métrica dentro de nuestro estudio.
+
+*Precision*:
+
+$$ \text {Precision = Verdaderos positivos / (Verdaderos positivos + Falsos positivos) } $$
+Si se obtiene un valor reducido, querrá decir que hay muchos falsos positivos, es decir que hemos levantado sospechas sobre transacciones no fraudulentas. Si bien se desean evitar estas situaciones ya que posee un costo económico (el banco deberá comunicarse con el cliente para corroborar la operación y realizar un análisis en profundidad de la misma), es de menor gravedad que el caso planteado en el apartado anterior.
+
+*F*:
+
+$$ \text {Prueba F = (2 * Precision * Recall) / (Recall + Precision) } $$
+Es la media armónica de las anteriores métricas. 
+
+Métodos a aplicar:
+
+*Oversampling*: Las técnicas de oversampling buscan generar nuevos valores de la clase minoritaria a la hora de entrenar los modelos, de manera tal que estos sean capaces de predecir mejor en datasets desbalanceados como el nuestro. En nuestro caso utilizaremos el método *Smote*, creando 2, 6, 15, 50 y 80 datos nuevos por cada uno ya existente de la clase minoritaria.
+
+*Undesampling*: Las técnicas de undersampling buscan eliminar datos de la clase mayoritaria a la hora de entrenar el modelo. En nuestro caso utilizaremos la función tomek link para dicho fin. Dicha función, busca los valores de la clase mayoritaria más cercanos a los de la clase minoritaria y los elimina.
+
+*Función de coste*: En la clasificación regular, el objetivo es minimizar la tasa de clasificación errónea y, por lo tanto, todos los tipos de errores se consideran igualmente graves. En cambio, en la clasificación sensible al costo, los errores no se suponen iguales y el objetivo es minimizar el costo esperado.
+
+En nuestro caso supondremos que el mayor costo está vinculado a no detectar operaciones fraudulentas (C = 5), seguido de predecir fraudes cuando no los hay (C = 1). Por último, no se le ha asignado ningun costo a predecir correctamente para simplificar.
+
+```{r, echo=FALSE}
+costs = matrix(c(0, 1, 5, 0), 2)
+colnames(costs) =  c("Fraudulento (Pred)", "No fraudulento (Pred)")
+rownames(costs) = c("Fraudulento (Real)", "No fraudulento (Real)")
+print(costs)
+```
+### Árbol
+
+A continuación se procede a entrenar, predecir, y evaluar, el modelo de árboles de clasificación. 
+El primero de ellos será sin realizar balanceo:
+
+
+```{r, fig.align = 'center'}
+set.seed(2021)
+
+arbol=rpart(Class ~ ., data = df.train)
+rpart.plot(arbol)
+
+```
+
+A continuación explicamos la rama derecha del plot, que aglutina a menos del 1% de los registros. 
+Observamos que en primer lugar el árbol evalúa el valor de *V17*. Si es menor que -3.2 la etiqueta correspondiente es de la clase minoritaria. En esta instancia, hay un 74% de los datos que corresponden a la clase minoritaria (fraude). 
+Se procede luego a analizar si *V12* es mayor o igual a -2.2. En caso de ser así, la etiqueta a aplicar es la de la clase mayoritaria. En este subgrupo hay un 3% de los datos que quedarían mal etiquetados, ya que pertenecen a la clase minoritaria. Si en cambio el valor de *V12* es menor a -2.2, la etiqueta es la correspondiente a la clase minoritaria (81% de los datos son de la clase minoritaria).
+Luego se analiza el valor de *V26*, si no es menor a -0.47, entonces se clasifica como de la clase minoritaria (92% de los valores de esta instancia lo son). Caso contrario, se evalúa el valor de *V26* nuevamente. En caso de que no sea mayor o igual a -0.7, los datos se clasifican como de la clase minoritaria. El 92% de los datos se corresponden a transacciones fraudulentas, lo que quiere decir que el 8% será mal clasificado. En caso contrario, se evalúa si *Amount* es menor a 0.027. En caso afirmativo, la etiqueta sera de transacción no fraudulenta (aunque el 12% de las transacciones lo son), mientras que en el caso contrario se clasifica de fraudulenta (83% de las transacciones lo son).
+
+```{r}
+prediccion=predict(arbol, newdata = df.test)
+pred_qual=rep("0",dim(prediccion)[1])
+pred_qual[prediccion[,2]>=0.5]="1"
+pred_qual=as.factor(pred_qual)
+
+conf_matrix_tree = confusionMatrix(pred_qual, df.test$Class, mode = "prec_recall", positive = "1")
+
+aprec=conf_matrix_tree$byClass[[5]]
+arecall=conf_matrix_tree$byClass[[6]]
+af= conf_matrix_tree$byClass[[7]]
+
+```
+
+Obtenemos una *Precision* de `r conf_matrix_tree$byClass[[5]]`, un *recall* de `r conf_matrix_tree$byClass[[6]]` y una medida *F* de `r conf_matrix_tree$byClass[[7]]`
+
+
+A continuación realizamos *undersampling*:
+
+```{r}
+set.seed(2021)
+
+X=df.train[,-30]
+Y=df.train$Class
+res_TOMEK=ubTomek(X, Y, verbose = TRUE)
+df.train3=data.frame(res_TOMEK$X,Class=res_TOMEK$Y)
+arbol=rpart(Class ~ ., data = df.train3)
+#rpart.plot(arbol)
+prediccion=predict(arbol, newdata = df.test)
+pred_qual=rep("0",dim(prediccion)[1])
+pred_qual[prediccion[,2]>=0.5]="1"
+pred_qual=as.factor(pred_qual)
+
+conf_matrix_tree_tomek = confusionMatrix(pred_qual, df.test$Class, mode = "prec_recall", positive = "1")
+
+aprec_tomek=conf_matrix_tree_tomek$byClass[[5]]
+arecall_tomek=conf_matrix_tree_tomek$byClass[[6]]
+af_tomek= conf_matrix_tree_tomek$byClass[[7]]
+
+```
+
+Obtenemos una *Precision* de `r conf_matrix_tree_tomek$byClass[[5]]`, un *recall* de `r conf_matrix_tree_tomek$byClass[[6]]` y una medida *F* de `r conf_matrix_tree_tomek$byClass[[7]]`
+
+
+A continuación repetimos la operación con una *función de coste:*
+
+```{r}
+set.seed(2021)
+tree_opt = rpart(Class ~ ., data = df.train, method = "class", parms=list(loss=c(0,5,1,0)))
+
+prediccion=predict(tree_opt, newdata = df.test, type = "class")
+
+
+conf_matrix_tree_opt <- caret::confusionMatrix(prediccion, df.test$Class, positive = "1", mode = "everything")
+
+afcost_prec = conf_matrix_tree_opt$byClass[[5]]
+afcost_recall = conf_matrix_tree_opt$byClass[[6]]
+afcost_f = conf_matrix_tree_opt$byClass[[7]]
+
+```
+
+Obtenemos una *Precision* de `r conf_matrix_tree_opt$byClass[[5]]`, un *recall* de `r conf_matrix_tree_opt$byClass[[6]]` y una medida *F* de `r conf_matrix_tree_opt$byClass[[7]]`
+
+
+A continuación realizamos diversas pruebas de ajuste de *oversampling*:
+
+```{r}
+# set.seed(2021)
+# 
+# X=df.train[,-30]
+# Y=df.train$Class
+# nei= c(5,10)
+# over= c(200,600,1500,5000,8000)
+# 
+# t=0
+# for (knei in nei) {
+#   for (perc.over in over) {
+#       t=t+1
+#       res_SMOTE=ubSMOTE(X, Y, perc.over = perc.over, k = knei, perc.under = 0, verbose = TRUE)
+#       df.train2=rbind(df.train,data.frame(res_SMOTE$X,Class=res_SMOTE$Y))
+#       arbol=rpart(Class ~ ., data = df.train2)
+#       prediccion=predict(arbol, newdata = df.test)
+#       pred_qual=rep("0",dim(prediccion)[1])
+#       pred_qual[prediccion[,2]>=0.5]="1"
+#       pred_qual=as.factor(pred_qual)
+# 
+#       conf_matrix_tree = confusionMatrix(pred_qual, df.test$Class, mode = "prec_recall", positive = "1")
+#       precision=conf_matrix_tree$byClass[[5]]
+#       recall=conf_matrix_tree$byClass[[6]]
+#       f=conf_matrix_tree$byClass[[7]]
+# 
+#       if (t==1){
+#         resultados = data.frame("oversampling", knei, perc.over,precision,recall, f)
+#         print(t)
+#   }
+#       else {
+#         resultados[t,] = data.frame("oversampling",knei, perc.over,precision,recall, f)
+#         print(t)
+# }
+# }
+# }
+# 
+# resultados[t+1,] = data.frame("sin balanceo", "NA", "NA", aprec, arecall, af)
+# resultados[t+2,] = data.frame("tomek-link", "NA", "NA", aprec_tomek, arecall_tomek, af_tomek)
+# resultados[t+3,] = data.frame("funcion de coste", "NA", "NA", afcost_prec, afcost_recall, afcost_f)
+# 
+# colnames(resultados)= c("Técnica", "K vecinos", "perc.over", "Precision", "Recall", "F")
+# print(resultados)
+# write.csv(resultados,"resultadostree.csv")
+read.csv("resultadostree.csv")
+```
+
+Resultados:
+
+Se observa que el mejor desempeño se logra con el modelo de *función de coste*, el cual logra una *F* de 0.8185, un *Recall* 0.8083, y una *Precision* 0.8290. Si bien se observa que hay resultados con una mejor *Recall* (métrica clave en nuestro análisis ya que un bajo valor representa que hay muchas transacciones fraudulentas no detectadas), estás poseen valores muy bajos para la *Precision* y por lo tanto para la *F*.
+
+### Logistic regression 
+
+En primer término se procede a entrenar el modelo y a evaluar sus coeficientes sin balancear:
+
+```{r}
+set.seed(2021)
+glm.fit=glm(Class~.,data=df.train, family=binomial)  
+summary(glm.fit)
+```
+
+Haciendo el summary de *glm.fit*, se observa que hay variables no significativas con un alfa al 5%. Se procede a realizar el modelado nuevamente sin incluirlas:
+
+```{r}
+glm.fit=glm(Class~V4+V8+V10+V13+V14+V16+V20+V21+V22+V27+V28,data=df.train,
+            family=binomial)
+summary(glm.fit)
+```
+
+Se pone de manifiesto que en el nuevo modelo son todas variables relevantes al 5% de significatividad.
+
+Se procede a realizar la predicción con los datos de testeo:
+
+```{r}
+glm.probs = predict(glm.fit, newdata = df.test, type = "response") 
+glm.pred = as.factor(ifelse(glm.probs>0.5,1,0))
+```
+
+Se evalúa el rendimiento del modelo:
+
+```{r}
+
+conf_matrix_glm = confusionMatrix(glm.pred, df.test$Class, mode = "prec_recall", positive = "1")
+
+glm= c("sin balanceo","NA","NA", conf_matrix_glm$byClass[[5]], conf_matrix_glm$byClass[[6]], conf_matrix_glm$byClass[[7]])
+```
+
+Obtenemos una *Precision* de `r conf_matrix_glm$byClass[5]`, un *recall* de `r conf_matrix_glm$byClass[6]` y una medida *F* de `r conf_matrix_glm$byClass[7]`
+
+
+A continuación replicamos haciendo *undersampling*:
+
+```{r}
+set.seed(2021)
+
+res_TOMEK=ubTomek(X, Y, verbose = TRUE)
+df.train3=data.frame(res_TOMEK$X,Class=res_TOMEK$Y)
+#glm.fit=glm(Class~.,data=df.train3, family=binomial)  
+#summary(glm.fit)
+glm.fit=glm(Class~V4+V8+V10+V13+V14+V20+V21+V22+V27+V28,data=df.train3,family=binomial)
+#summary(glm.fit)
+glm.probs = predict(glm.fit, newdata = df.test, type = "response") 
+glm.pred = as.factor(ifelse(glm.probs>0.5,1,0))
+
+conf_matrix_treetomek = confusionMatrix(glm.pred, df.test$Class, mode = "prec_recall", positive = "1")
+
+glm_tomek= c("tomek link","NA","NA", conf_matrix_treetomek$byClass[[5]], conf_matrix_treetomek$byClass[[6]], conf_matrix_treetomek$byClass[[7]])
+
+```
+
+Obtenemos una *Precision* de `r conf_matrix_treetomek$byClass[5]`, un *recall* de `r conf_matrix_treetomek$byClass[6]` y una medida *F* de `r conf_matrix_treetomek$byClass[7]`
+
+A continuación realizamos diversas pruebas de ajuste de *oversampling*:
+
+```{r}
+# K=5 y perc.over = 200
+#set.seed(2021)
+
+#X=df.train[,-30]
+#Y=df.train$Class
+
+#res_SMOTE=ubSMOTE(X, Y, perc.over = 200, k = 5, perc.under = 0, verbose = TRUE)
+#df.train2=rbind(df.train,data.frame(res_SMOTE$X,Class=res_SMOTE$Y))
+#glm.fit=glm(Class~.,data=df.train2, family=binomial)  
+#summary(glm.fit)
+#glm.fit=glm(Class~V1+V4+V8+V10+V12+V13+V14+V16+V20+V21+V22+V24+V26,data=df.train2,family=binomial) #ya se ha hecho el proceso de elegir solo las variables significativas
+#summary(glm.fit)
+#glm.probs = predict(glm.fit, newdata = df.test, type = "response") 
+#glm.pred = as.factor(ifelse(glm.probs>0.5,1,0))
+
+#conf_matrix_glm = confusionMatrix(glm.pred, df.test$Class, mode = "prec_recall", positive = "1")
+#glm1= c("oversampling",5,200, conf_matrix_glm$byClass[[5]], conf_matrix_glm$byClass[[6]], conf_matrix_glm$byClass[[7]])
+
+
+
+# K=5 y perc.over = 600
+#set.seed(2021)
+
+#res_SMOTE=ubSMOTE(X, Y, perc.over = 600, k = 5, perc.under = 0, verbose = TRUE)
+#df.train2=rbind(df.train,data.frame(res_SMOTE$X,Class=res_SMOTE$Y))
+#glm.fit=glm(Class~.,data=df.train2, family=binomial)
+#summary(glm.fit)
+#glm.fit=glm(Class~V1+V3+V4+V6+V8+V10+V11+V12+V13+V14+V16+V20+V21+V22+V24+V26,data=df.train2,family=binomial)
+#summary(glm.fit)
+#glm.probs = predict(glm.fit, newdata = df.test, type = "response")
+#glm.pred = as.factor(ifelse(glm.probs>0.5,1,0))
+
+#conf_matrix_glm = confusionMatrix(glm.pred, df.test$Class, mode = "prec_recall", positive = "1")
+#glm2= c("overampling",5,600, conf_matrix_glm$byClass[[5]], conf_matrix_glm$byClass[[6]], conf_matrix_glm$byClass[[7]])
+
+
+
+# K=5 y perc.over = 1500
+# set.seed(2021)
+# 
+# res_SMOTE=ubSMOTE(X, Y, perc.over = 1500, k = 5, perc.under = 0, verbose = TRUE)
+# df.train2=rbind(df.train,data.frame(res_SMOTE$X,Class=res_SMOTE$Y))
+# glm.fit=glm(Class~.,data=df.train2, family=binomial)
+# summary(glm.fit)
+# glm.fit=glm(Class~V1+V3+V4+V6+V8+V9+V10+V11+V12+V13+V14+V16+V20+V21+V22+V24+V25+V26,data=df.train2,family=binomial)
+# summary(glm.fit)
+# glm.probs = predict(glm.fit, newdata = df.test, type = "response") 
+# glm.pred = as.factor(ifelse(glm.probs>0.5,1,0))
+# 
+# conf_matrix_glm = confusionMatrix(glm.pred, df.test$Class, mode = "prec_recall", positive = "1")
+# glm3= c("oversampling",5,1500, conf_matrix_glm$byClass[[5]], conf_matrix_glm$byClass[[6]], conf_matrix_glm$byClass[[7]])
+
+
+
+# K=5 y perc.over = 5000
+# set.seed(2021)
+# 
+# res_SMOTE=ubSMOTE(X, Y, perc.over = 5000, k = 5, perc.under = 0, verbose = TRUE)
+# df.train2=rbind(df.train,data.frame(res_SMOTE$X,Class=res_SMOTE$Y))
+# glm.fit=glm(Class~.,data=df.train2, family=binomial)  
+# summary(glm.fit)
+# glm.fit=glm(Class~V1+V2+V4+V6+V8+V9+V10+V11+V12+V13+V14+V16+V17+V18+V20+V21+V22+V24+V25+V26+Amount,data=df.train2,family=binomial)
+# summary(glm.fit)
+# glm.probs = predict(glm.fit, newdata = df.test, type = "response") 
+# glm.pred = as.factor(ifelse(glm.probs>0.5,1,0))
+# 
+# conf_matrix_glm = confusionMatrix(glm.pred, df.test$Class, mode = "prec_recall", positive = "1")
+# glm4= c("oversampling",5,1500, conf_matrix_glm$byClass[[5]], conf_matrix_glm$byClass[[6]], conf_matrix_glm$byClass[[7]])
+
+
+# K=5 y perc.over = 8000
+# set.seed(2021)
+# 
+# res_SMOTE=ubSMOTE(X, Y, perc.over = 8000, k = 5, perc.under = 0, verbose = TRUE)
+# df.train2=rbind(df.train,data.frame(res_SMOTE$X,Class=res_SMOTE$Y))
+# glm.fit=glm(Class~.,data=df.train2, family=binomial)  
+# summary(glm.fit)
+# glm.fit=glm(Class~V1+V3+V4+V5+V6+V7+V8+V9+V10+V11+V12+V13+V14+V16+V17+V18+V19+V20+V21+V22+V23+V24+V25+V26+V27+V28+Amount,data=df.train2,family=binomial)
+# summary(glm.fit)
+# glm.probs = predict(glm.fit, newdata = df.test, type = "response") 
+# glm.pred = as.factor(ifelse(glm.probs>0.5,1,0))
+# 
+# conf_matrix_glm = confusionMatrix(glm.pred, df.test$Class, mode = "prec_recall", positive = "1")
+# glm5= c("oversampling",5,8000, conf_matrix_glm$byClass[[5]], conf_matrix_glm$byClass[[6]], conf_matrix_glm$byClass[[7]])
+
+
+
+# K=10 y perc.over = 200
+# set.seed(2021)
+# 
+# res_SMOTE=ubSMOTE(X, Y, perc.over = 200, k = 10, perc.under = 0, verbose = TRUE)
+# df.train2=rbind(df.train,data.frame(res_SMOTE$X,Class=res_SMOTE$Y))
+# glm.fit=glm(Class~.,data=df.train2, family=binomial)  
+# summary(glm.fit)
+# glm.fit=glm(Class~V3+V4+V8+V9+V10+V12+V13+V14+V16+V20+V21+V22+V24+V26+V27,data=df.train2,family=binomial)
+# summary(glm.fit)
+# glm.probs = predict(glm.fit, newdata = df.test, type = "response") 
+# glm.pred = as.factor(ifelse(glm.probs>0.5,1,0))
+# 
+# conf_matrix_glm = confusionMatrix(glm.pred, df.test$Class, mode = "prec_recall", positive = "1")
+# glm6= c("oversampling", 10,200, conf_matrix_glm$byClass[[5]], conf_matrix_glm$byClass[[6]], conf_matrix_glm$byClass[[7]])
+
+
+
+# K=10 y perc.over = 600
+#set.seed(2021)
+
+#res_SMOTE=ubSMOTE(X, Y, perc.over = 600, k = 10, perc.under = 0, verbose = TRUE)
+#df.train2=rbind(df.train,data.frame(res_SMOTE$X,Class=res_SMOTE$Y))
+#glm.fit=glm(Class~.,data=df.train2, family=binomial)  
+#summary(glm.fit)
+#glm.fit=glm(Class~V1+V3+V4+V6+V8+V10+V11+V12+V13+V14+V16+V20+V21+V22+V24+V25+V26,data=df.train2,family=binomial)
+#summary(glm.fit)
+#glm.probs = predict(glm.fit, newdata = df.test, type = "response") 
+#glm.pred = as.factor(ifelse(glm.probs>0.5,1,0))
+
+#conf_matrix_glm = confusionMatrix(glm.pred, df.test$Class, mode = "prec_recall", positive = "1")
+#glm7= c("oversampling",10,600, conf_matrix_glm$byClass[[5]], conf_matrix_glm$byClass[[6]], conf_matrix_glm$byClass[[7]])
+
+
+
+# K=10 y perc.over = 1500
+# set.seed(2021)
+# 
+# res_SMOTE=ubSMOTE(X, Y, perc.over = 1500, k = 10, perc.under = 0, verbose = TRUE)
+# df.train2=rbind(df.train,data.frame(res_SMOTE$X,Class=res_SMOTE$Y))
+# glm.fit=glm(Class~.,data=df.train2, family=binomial)  
+# summary(glm.fit)
+# glm.fit=glm(Class~V1+V3+V4+V6+V8+V9+V10+V11+V12+V13+V14+V16+V20+V21+V22+V24+V25+V26,data=df.train2,family=binomial)
+# summary(glm.fit)
+# glm.probs = predict(glm.fit, newdata = df.test, type = "response") 
+# glm.pred = as.factor(ifelse(glm.probs>0.5,1,0))
+# 
+# conf_matrix_glm = confusionMatrix(glm.pred, df.test$Class, mode = "prec_recall", positive = "1")
+# glm8= c("oversampling",10,1500, conf_matrix_glm$byClass[[5]], conf_matrix_glm$byClass[[6]], conf_matrix_glm$byClass[[7]])
+
+
+
+# K=10 y perc.over = 5000
+# set.seed(2021)
+# 
+# res_SMOTE=ubSMOTE(X, Y, perc.over = 5000, k = 10, perc.under = 0, verbose = TRUE)
+# df.train2=rbind(df.train,data.frame(res_SMOTE$X,Class=res_SMOTE$Y))
+# glm.fit=glm(Class~.,data=df.train2, family=binomial)  
+# summary(glm.fit)
+# glm.fit=glm(Class~V1+V3+V4+V5+V6+V7+V8+V9+V10+V11+V12+V13+V14+V16+V20+V21+V22+V24+V25+V26+V27+Amount,data=df.train2,family=binomial)
+# summary(glm.fit)
+# glm.probs = predict(glm.fit, newdata = df.test, type = "response") 
+# glm.pred = as.factor(ifelse(glm.probs>0.5,1,0))
+# 
+# conf_matrix_glm = confusionMatrix(glm.pred, df.test$Class, mode = "prec_recall", positive = "1")
+# glm9= c("oversampling",10,1500, conf_matrix_glm$byClass[[5]], conf_matrix_glm$byClass[[6]], conf_matrix_glm$byClass[[7]])
+
+
+# K=10 y perc.over = 8000
+# set.seed(2021)
+# 
+# res_SMOTE=ubSMOTE(X, Y, perc.over = 8000, k = 10, perc.under = 0, verbose = TRUE)
+# df.train2=rbind(df.train,data.frame(res_SMOTE$X,Class=res_SMOTE$Y))
+# glm.fit=glm(Class~.,data=df.train2, family=binomial)  
+# summary(glm.fit)
+# glm.fit=glm(Class~V1+V3+V4+V5+V6+V7+V8+V9+V10+V11+V12+V13+V14+V16+V17+V20+V21+V22+V23+V24+V25+V26+V27+V28+Amount,data=df.train2,family=binomial)
+# summary(glm.fit)
+# glm.probs = predict(glm.fit, newdata = df.test, type = "response") 
+# glm.pred = as.factor(ifelse(glm.probs>0.5,1,0))
+# 
+# conf_matrix_glm = confusionMatrix(glm.pred, df.test$Class, mode = "prec_recall", positive = "1")
+# glm10= c("oversampling", 10,8000, conf_matrix_glm$byClass[[5]], conf_matrix_glm$byClass[[6]], conf_matrix_glm$byClass[[7]])
+
+
+
+# detalle_modelo= c("tecnica","K-vecinos","perc.over","Precision", "Recall", "F1" )
+# resultados = data.frame(detalle_modelo, glm, glm1,glm2,glm3,glm4,glm5,glm6,glm7,glm8,glm9,glm10,glm_tomek)
+# print(resultados)  
+# 
+# 
+# write.csv(resultados,"resultadosglm.csv")
+read.csv("resultadosglm.csv")
+
+
+
+```
+Resultados:
+
+En este caso vemos que el modelo glm2, con K=5 y perc.over=600 es el que tiene mejor rendimiento. Posee un *F* de 0.8083, e iguales medidas de *Precision* y *Recall*. Si bien hay algunos modelos con mayor *Recall*, los mismos performan mal para la *Precision* y por lo tanto para la *F*, por lo que consideramos que dichos efectos no se compensan.
+
+
+### Quadratic Discriminant Analysis
+
+Se comienza entrenando el modelo y luego prediciendo con los datos de testeo:
+
+```{r}
+set.seed(2021)
+qda.fit=qda(Class~.,data=df, subset=muestra.train)
+qda.pred=predict(qda.fit,newdata=df.test)
+
+conf_matrix_qda <- confusionMatrix(qda.pred$class, df.test$Class, mode = "prec_recall", positive = "1")
+
+qdaprec=conf_matrix_qda$byClass[[5]]
+qdarecall=conf_matrix_qda$byClass[[6]]
+qdaf= conf_matrix_qda$byClass[[7]]
+```
+
+
+Obtenemos una *precision* muy baja, de `r conf_matrix_qda$byClass[5]`, una *Recall* de `r conf_matrix_qda$byClass[6]` y una *F* de `r conf_matrix_qda$byClass[7]`
+
+A continuación realizamos *undersampling*:
+
+```{r}
+set.seed(2021)
+
+res_TOMEK=ubTomek(X, Y, verbose = TRUE)
+df.train3=data.frame(res_TOMEK$X,Class=res_TOMEK$Y)
+qda.fit=qda(Class~.,data= df.train3)
+qda.pred=predict(qda.fit,newdata=df.test)
+pred_qual<-qda.pred[["class"]]
+pred_qual=as.factor(pred_qual)
+
+conf_matrix_qdatomek = confusionMatrix(qda.pred$class, df.test$Class, mode = "prec_recall", positive = "1")
+
+qdaprec_tomek=conf_matrix_qdatomek$byClass[[5]]
+qdarecall_tomek=conf_matrix_qdatomek$byClass[[6]]
+qdaf_tomek= conf_matrix_qdatomek$byClass[[7]]
+```
+
+Obtenemos una *precision* `r conf_matrix_qdatomek$byClass[5]`, una *Recall* de `r conf_matrix_qdatomek$byClass[6]` y una *F* de `r conf_matrix_qdatomek$byClass[7]`
+
+A continuación, probamos diversos *oversampling*:
+
+```{r}
+#  set.seed(2021)
+#  X=df.train[,-30]
+#  Y=df.train$Class
+#  nei= c(5,10)
+#  over= c(200,600,1500,5000,8000)
+#  
+#  t=0
+#  for (knei in nei) {
+#    for (perc.over in over) {
+#        t=t+1
+#        res_SMOTE=ubSMOTE(X, Y, perc.over = perc.over, k = knei, perc.under = 0, verbose = TRUE)
+#        df.train2=rbind(df.train,data.frame(res_SMOTE$X,Class=res_SMOTE$Y))
+#        df.train3=1:dim(df.train2)[1]
+#        qda.fit=qda(Class~.,data=df, subset=df.train3)
+#        qda.pred=predict(qda.fit,newdata=df.test)
+#        
+#        
+#        conf_matrix_qda = confusionMatrix(qda.pred$class, df.test$Class, mode = "prec_recall", positive =  "1")
+#        precision=conf_matrix_qda$byClass[[5]]
+#        recall=conf_matrix_qda$byClass[[6]]
+#        f=conf_matrix_qda$byClass[[7]]
+#        
+#        if (t==1){
+#          resultados = data.frame("oversampling",knei, perc.over,precision,recall, f)
+#          print(t)
+#    }
+#        else {
+#          resultados[t,] = data.frame("oversampling",knei, perc.over,precision,recall, f)
+#          print(t)
+#  }
+#  }
+#  }
+# 
+# resultados[t+1,] = data.frame("sin balanceo", "NA", "NA", qdaprec, qdarecall, qdaf)
+# resultados[t+2,] = data.frame("tomek link", "NA", "NA", qdaprec_tomek, qdarecall_tomek, qdaf_tomek)
+
+
+
+#colnames(resultados)= c("tecnica", "k vecinos", "perc.over", "Precision", "Recall", "F")
+#print(resultados)  
+
+#write.csv(resultados,"resultadosqda.csv")
+read.csv("resultadosqda.csv")
+
+
+```
+Resultados:
+
+Observamos que de los modelos planteados, los mejores son los dos modelos con perc.over = 5000. Ambos obtienen un valor elevado para la *recall*, de 0.8583 (igual que todos los otros modelos). En cuanto a la *precision*, esta métrica es de 0.057, mientras que la *F* es 0.1091. Se relevan pésimos resultados de *precision* y *F* para todos los modelos. 
+
+
+### Naive Bayes
+
+Se entrena el modelo sin balanceo con los datos de *training*, luego se predice con los datos de *testing*, y por último se evalúa la matriz de confusión:
+
+```{r}
+set.seed(2022)
+nb.fit <- naiveBayes(Class~. , data = df , subset = muestra.train )
+nb.pred <- predict (nb.fit , newdata=df.test)
+
+conf_matrix_nb <- confusionMatrix(nb.pred, df.test$Class, mode = "prec_recall", positive = "1")
+
+nbprec=conf_matrix_nb$byClass[[5]]
+nbrecall=conf_matrix_nb$byClass[[6]]
+nbf= conf_matrix_nb$byClass[[7]]
+
+```
+
+Obtenemos una *precision* de `r conf_matrix_nb$byClass[5]`, una *Recall* de `r conf_matrix_nb$byClass[6]` y una *F* de `r conf_matrix_nb$byClass[7]`
+
+A continuación realizamos *undersampling*
+
+```{r}
+set.seed(2021)
+
+res_TOMEK=ubTomek(X, Y, verbose = TRUE)
+df.train3=data.frame(res_TOMEK$X,Class=res_TOMEK$Y)
+nb.fit=naiveBayes(Class~.,data=df.train3)
+nb.pred=predict(nb.fit,newdata=df.test)
+
+conf_matrix_nbtomek = confusionMatrix(nb.pred, df.test$Class, mode = "prec_recall", positive = "1")
+
+nbprec_tomek=conf_matrix_nbtomek$byClass[[5]]
+nbrecall_tomek=conf_matrix_nbtomek$byClass[[6]]
+nbf_tomek= conf_matrix_nbtomek$byClass[[7]]
+
+
+```
+Obtenemos una *precision* de `r conf_matrix_nbtomek$byClass[5]`, una *Recall* de `r conf_matrix_nbtomek$byClass[6]` y una *F* de `r conf_matrix_nbtomek$byClass[7]`
+
+A continuación realizamos diversos *oversampling*:
+
+```{r}
+
+#set.seed(2021)
+#X=df.train[,-30]
+#Y=df.train$Class
+#nei= c(5,10)
+#over= c(200,600,1500,5000,8000)
+
+#t=0
+#for (knei in nei) {
+#  for (perc.over in over) {
+#      t=t+1
+#      res_SMOTE=ubSMOTE(X, Y, perc.over = perc.over, k = knei, perc.under = 0, verbose = TRUE)
+#      df.train2=rbind(df.train,data.frame(res_SMOTE$X,Class=res_SMOTE$Y))
+#      df.train3= 1:dim(df.train2)[1]
+#      nb.fit=naiveBayes(Class~.,data=df, subset=df.train3)
+#      nb.pred=predict(nb.fit,newdata=df.test)
+#
+#
+#      conf_matrix_nb = confusionMatrix(nb.pred, df.test$Class, mode = "prec_recall", positive = "1")
+#      precision=conf_matrix_nb$byClass[[5]]
+#      recall=conf_matrix_nb$byClass[[6]]
+#      f=conf_matrix_nb$byClass[[7]]
+#
+#      if (t==1){
+#        resultados = data.frame("oversampling",knei, perc.over,precision,recall, f)
+#        print(t)
+#  }
+#      else {
+#        resultados[t,] = data.frame("oversampling",knei, perc.over,precision,recall, f)
+#        print(t)
+#}
+#}
+#}
+
+#resultados[t+1,] = data.frame("Sin balanceo", "NA", "NA", nbprec, nbrecall, nbf)
+#resultados[t+2,] = data.frame("Tomek link", "NA", "NA", nbprec_tomek, nbrecall_tomek, nbf_tomek)
+
+#colnames(resultados)=c("Técnica", "K vecinos", "perc.over", "Precision", "Recall", "F")
+
+#print(resultados)
+#write.csv(resultados,"resultadosnb.csv")
+read.csv("resultadosnb.csv")
+
+```
+
+Vemos una diferencia de rendimiento muy pequeña entre los diversos modelos. Se observa un mal rendimiento de la *Precision* y un buen comportamiento de la *Recall*. Los mejores modelos son aquellos que plantean un perc.over = 5000, que obtienen una *F* de 0.1162255.
+
+
+# 5. Conclusión
+
+A continuación realizamos una tabla con los mejores modelos de cada apartado:
+
+```{r}
+
+comparativo= data.frame("Árbol - Funcion de coste", "NA", "NA", 0.8290, 0.8083, 0.8185)
+comparativo[2,] = data.frame("GLM", 5, 600, 0.8083, 0.8083, 0.8081)
+comparativo[3,] = data.frame("QDA", 5, 5000, 0.057, 0.8583, 0.1091)
+comparativo[4,] = data.frame("NB", 5, 5000, 0.062, 0.8416, 0.1162)
+
+colnames(comparativo)= c("modelo", "K", "perc.over", "Precision", "Recall", "F")
+print(comparativo)
+
+		
+```
+Vemos que los modelos de *Quadratic discriminant analysis* y *Naive Bayes* han performado muy mal. Luego, tanto el mejor modelo de *árboles* como el de *Linear Model* obtienen buenas métricas. El mejor modelo es el de *función de coste* para árboles, que obtiene una medida *F* de 0.8185.
+
+
+
+
+
+
+
+
